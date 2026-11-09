@@ -1,6 +1,27 @@
 
 #!/usr/bin/env bash
 
+MODE="interpreter"
+JIT_ARGS=()
+
+if [[ $# -gt 1 ]]; then
+    echo "Usage: $0 [--jit]" >&2
+    exit 1
+fi
+
+if [[ $# -eq 1 ]]; then
+    if [[ "$1" != "--jit" ]]; then
+        echo "Usage: $0 [--jit]" >&2
+        exit 1
+    fi
+
+    MODE="jit"
+    JIT_ARGS=(--jit)
+fi
+
+echo "Running tests with $MODE"
+
+
 BIN="./bfckd"
 TEST_DIR="./tests"
 
@@ -61,7 +82,7 @@ run_tests() {
         fi
 
         # Execute program
-        "$BIN" "$src" \
+        "$BIN" "${JIT_ARGS[@]}" "$src" \
             < "$input" \
             > "$tmpdir/actual.stdout" \
             2> "$tmpdir/actual.stderr"

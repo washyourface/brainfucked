@@ -58,6 +58,23 @@ typedef struct {
     size_t capacity;
 } Code;
 
+typedef struct {
+    size_t* items;
+    size_t count;
+    size_t capacity;
+} Offsets;
+
+typedef struct {
+    size_t position;
+    size_t target;
+} Patch;
+
+typedef struct {
+    Patch* items;
+    size_t count;
+    size_t capacity;
+} Patches;
+
 bool is_valid_token(char ch) {
     const char* cmds = "+-<>,.[]";
     return strchr(cmds, ch) != NULL;
@@ -243,8 +260,14 @@ bool parse(Scanner* scanner, Instructions* instructions) {
  */
 typedef int (*JitFn)(uint8_t*, int (*)(int), int (*)(void));
 
+// TODO: Add Windows x86-64 JIT support (Microsoft x64 ABI).
+// - Use VirtualAlloc/VirtualProtect instead of mmap/mprotect.
+// - Adapt argument registers, stack alignment and shadow space.
+// - Review callee-saved register preservation.
 bool jit(Instructions* instructions) {
     Code code = { 0 };
+    Offsets offsets = { 0 };
+    Patches patches = { 0 };
 
 #define EMIT(byte) ARRAY_PUSH(&code, (uint8_t)(byte))
 
@@ -297,6 +320,7 @@ bool jit(Instructions* instructions) {
     EMIT32(TAPE_SIZE);
 
     for (size_t i = 0; i < instructions->count; i++) {
+        ARRAY_PUSH(&offsets, code.count);
         Instruction instr = instructions->items[i];
 
         switch (instr.opcode) {
@@ -406,12 +430,114 @@ bool jit(Instructions* instructions) {
             EMIT(0x88);
             EMIT(0x03);
             break;
+        case OP_JUMP_ZERO: {
+            // cmp byte [rbx], 0
+            EMIT(0x80);
+            EMIT(0x3B);
+            EMIT(0x00);
+
+            // je rel32
+            EMIT(0x0F);
+            EMIT(0x84);
+
+            size_t position = code.count;
+            EMIT32(0);
+
+            Patch patch = {
+                .position = position,
+                .target = instr.operand
+            };
+
+            ARRAY_PUSH(&patches, patch);
+            break;
+        }
+        case OP_JUMP_NONZERO: {
+            // cmp byte [rbx], 0
+            EMIT(0x80);
+            EMIT(0x3B);
+            EMIT(0x00);
+
+            // jne rel32
+            EMIT(0x0F);
+            EMIT(0x85);
+
+            size_t position = code.count;
+            EMIT32(0);
+
+            Patch patch = {
+                .position = position,
+                .target = instr.operand
+            };
+
+            ARRAY_PUSH(&patches, patch);
+            break;
+        }
         default:
             fprintf(stderr, "Unsupported JIT opcode\n");
+            ARRAY_FREE(&patches);
+            ARRAY_FREE(&offsets);
             ARRAY_FREE(&code);
             return false;
         }
     }
+
+    ARRAY_PUSH(&offsets, code.count);
+
+    for (size_t i = 0; i < patches.count; i++) {
+        Patch patch = patches.items[i];
+
+        if (patch.target >= offsets.count ||
+            patch.position > code.count ||
+            code.count - patch.position < 4) {
+            fprintf(stderr, "Invalid JIT jump target\n");
+            ARRAY_FREE(&patches);
+            ARRAY_FREE(&offsets);
+            ARRAY_FREE(&code);
+            return false;
+        }
+
+        size_t target = offsets.items[patch.target];
+        size_t origin = patch.position + 4;
+
+        int64_t displacement;
+
+        if (target >= origin) {
+            size_t distance = target - origin;
+
+            if (distance > INT32_MAX) {
+                fprintf(stderr, "JIT jump out of range\n");
+                ARRAY_FREE(&patches);
+                ARRAY_FREE(&offsets);
+                ARRAY_FREE(&code);
+                return false;
+            }
+
+            displacement = (int64_t)distance;
+        }
+        else {
+            size_t distance = origin - target;
+
+            if (distance > (uint64_t)INT32_MAX + 1) {
+                fprintf(stderr, "JIT jump out of range\n");
+                ARRAY_FREE(&patches);
+                ARRAY_FREE(&offsets);
+                ARRAY_FREE(&code);
+                return false;
+            }
+
+            displacement = -(int64_t)distance;
+        }
+
+        uint32_t value = (uint32_t)(int32_t)displacement;
+
+        for (int j = 0; j < 4; j++) {
+            code.items[patch.position + j] =
+                (uint8_t)(value >> (j * 8));
+        }
+    }
+
+    ARRAY_FREE(&patches);
+    ARRAY_FREE(&offsets);
 
     // Return 0 (success)
     //xor eax, eax
@@ -475,16 +601,27 @@ bool jit(Instructions* instructions) {
 }
 
 int main(int argc, char** argv) {
-    if (argc <= 1) {
+    bool use_jit = false;
+    const char* path = NULL;
+
+    if (argc == 2) {
+        path = argv[1];
+    }
+    else if (argc == 3 && strcmp(argv[1], "--jit") == 0) {
+        use_jit = true;
+        path = argv[2];
+    }
+    else {
         usage(argv[0]);
         return 1;
     }
-    const char* path = argv[1];
+
     char* content = read_entire_file(path);
     if (content == NULL) {
         fprintf(stderr, "ERROR: Cannot read file: %s\n", path);
         return 1;
     }
+
     Scanner scanner = { 0 };
     scanner.cmds = content;
     scanner.count = strlen(scanner.cmds);
@@ -493,15 +630,16 @@ int main(int argc, char** argv) {
     Instructions instructions = { 0 };
     ARRAY_INIT(&instructions);
 
-    // dump_instructions(&instructions);
-    //int result = parse(&scanner, &instructions) && interpret(&instructions) ? 0 : 1;
-    int result = parse(&scanner, &instructions) &&
-        jit(&instructions) ? 0 : 1;
+    bool success = parse(&scanner, &instructions);
 
+    if (success) {
+        success = use_jit
+            ? jit(&instructions)
+            : interpret(&instructions);
+    }
 
     ARRAY_FREE(&instructions);
-
     free(scanner.cmds);
 
-    return result;
+    return success ? 0 : 1;
 }

@@ -106,6 +106,10 @@ tests = {
 expected_errors = {
     "tape_overflow": (1, b"Tape overflow\n"),
     "tape_underflow": (1, b"Tape underflow\n"),
+    "jit_overflow": (1, b"Tape overflow\n"),
+    "jit_overflow_offset": (1, b"Tape overflow\n"),
+    "jit_underflow": (1, b"Tape underflow\n"),
+    "jit_underflow_offset": (1, b"Tape underflow\n"),
 }
 
 directory = Path("tests")
