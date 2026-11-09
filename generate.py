@@ -85,6 +85,22 @@ tests = {
         "+[<]",
         b"",
     ),
+    "jit_underflow": (
+        "<",
+        b"",
+    ),
+    "jit_overflow": (
+        ">" * 30000,
+        b"",
+    ),
+    "jit_overflow_offset": (
+        ">" * 29999 + ">",
+        b"",
+    ),
+    "jit_underflow_offset": (
+        ">>><<<<",
+        b"",
+    ),
 }
 
 expected_errors = {

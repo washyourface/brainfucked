@@ -235,7 +235,13 @@ bool parse(Scanner* scanner, Instructions* instructions) {
     return success;
 }
 
-typedef int (*JitFn)(uint8_t*, int (*)(int));
+/**
+ * uint8_t* tape,
+ * int (*)(int) putchar,
+ * int (*)(void) getchar
+ * returns 0 if ok, 1 if Tape overflow or 2 when Tape underflow
+ */
+typedef int (*JitFn)(uint8_t*, int (*)(int), int (*)(void));
 
 bool jit(Instructions* instructions) {
     Code code = { 0 };
@@ -250,12 +256,45 @@ bool jit(Instructions* instructions) {
         }                                        \
     } while (0)
 
+#define EMIT_EPILOGUE()                       \
+    do {                                      \
+        EMIT(0x41); EMIT(0x5F); /* pop r15 */ \
+        EMIT(0x41); EMIT(0x5E); /* pop r14 */ \
+        EMIT(0x41); EMIT(0x5D); /* pop r13 */ \
+        EMIT(0x41); EMIT(0x5C); /* pop r12 */ \
+        EMIT(0x5B);             /* pop rbx */ \
+        EMIT(0xC3);             /* ret */     \
+    } while (0)
+
+#define EMIT_ERROR(status)                    \
+        do {                                      \
+            EMIT(0xB8);             /* mov eax */ \
+            EMIT32(status);                       \
+            EMIT_EPILOGUE();                      \
+        } while (0)
+
+
     // Prologue
-    EMIT(0x53);                         // push rbx
-    EMIT(0x41); EMIT(0x54);             // push r12
-    EMIT(0x48); EMIT(0x83); EMIT(0xEC); EMIT(0x08); // sub rsp, 8
+    EMIT(0x53);             // push rbx
+    EMIT(0x41); EMIT(0x54); // push r12
+    EMIT(0x41); EMIT(0x55); // push r13
+    EMIT(0x41); EMIT(0x56); // push r14
+    EMIT(0x41); EMIT(0x57); // push r15
+
     EMIT(0x48); EMIT(0x89); EMIT(0xFB); // mov rbx, rdi
     EMIT(0x49); EMIT(0x89); EMIT(0xF4); // mov r12, rsi
+    EMIT(0x49); EMIT(0x89); EMIT(0xFD); // mov r13, rdi
+
+    // mov r15, rdx
+    EMIT(0x49);
+    EMIT(0x89);
+    EMIT(0xD7);
+
+    // lea r14, [rdi + TAPE_SIZE]
+    EMIT(0x4C);
+    EMIT(0x8D);
+    EMIT(0xB7);
+    EMIT32(TAPE_SIZE);
 
     for (size_t i = 0; i < instructions->count; i++) {
         Instruction instr = instructions->items[i];
@@ -275,28 +314,60 @@ bool jit(Instructions* instructions) {
             break;
         case OP_MOVE_RIGHT:
             if (instr.operand >= TAPE_SIZE) {
-                fprintf(stderr, "Tape overflow\n");
-                ARRAY_FREE(&code);
-                return false;
+                EMIT_ERROR(1);
+                break;
             }
-            // add rbx, imm32
+
+            // lea rax, [rbx + imm32]
             EMIT(0x48);
-            EMIT(0x81);
-            EMIT(0xC3);
+            EMIT(0x8D);
+            EMIT(0x83);
             EMIT32(instr.operand);
+
+            // cmp rax, r14
+            EMIT(0x4C);
+            EMIT(0x39);
+            EMIT(0xF0);
+
+            // jb +15
+            EMIT(0x72);
+            EMIT(0x0F);
+
+            EMIT_ERROR(1);
+
+            // mov rbx, rax
+            EMIT(0x48);
+            EMIT(0x89);
+            EMIT(0xC3);
             break;
 
         case OP_MOVE_LEFT:
             if (instr.operand >= TAPE_SIZE) {
-                fprintf(stderr, "Tape underflow\n");
-                ARRAY_FREE(&code);
-                return false;
+                EMIT_ERROR(2);
+                break;
             }
-            // sub rbx, imm32
+
+            // lea rax, [rbx - imm32]
             EMIT(0x48);
-            EMIT(0x81);
-            EMIT(0xEB);
-            EMIT32(instr.operand);
+            EMIT(0x8D);
+            EMIT(0x83);
+            EMIT32((uint32_t)(-(int32_t)instr.operand));
+
+            // cmp rax, r13
+            EMIT(0x4C);
+            EMIT(0x39);
+            EMIT(0xE8);
+
+            // jae +15
+            EMIT(0x73);
+            EMIT(0x0F);
+
+            EMIT_ERROR(2);
+
+            // mov rbx, rax
+            EMIT(0x48);
+            EMIT(0x89);
+            EMIT(0xC3);
             break;
 
         case OP_OUTPUT:
@@ -312,7 +383,29 @@ bool jit(Instructions* instructions) {
                 EMIT(0xD4);
             }
             break;
+        case OP_INPUT:
+            // call r15
+            EMIT(0x41);
+            EMIT(0xFF);
+            EMIT(0xD7);
 
+            // cmp eax, -1 (EOF)
+            EMIT(0x83);
+            EMIT(0xF8);
+            EMIT(0xFF);
+
+            // jne +2
+            EMIT(0x75);
+            EMIT(0x02);
+
+            // xor eax, eax
+            EMIT(0x31);
+            EMIT(0xC0);
+
+            // mov byte [rbx], al
+            EMIT(0x88);
+            EMIT(0x03);
+            break;
         default:
             fprintf(stderr, "Unsupported JIT opcode\n");
             ARRAY_FREE(&code);
@@ -326,11 +419,10 @@ bool jit(Instructions* instructions) {
     EMIT(0xC0);
 
     // Epilogue
-    EMIT(0x48); EMIT(0x83); EMIT(0xC4); EMIT(0x08); // add rsp, 8
-    EMIT(0x41); EMIT(0x5C);             // pop r12
-    EMIT(0x5B);                         // pop rbx
-    EMIT(0xC3);                         // ret
+    EMIT_EPILOGUE();
 
+#undef EMIT_ERROR
+#undef EMIT_EPILOGUE
 #undef EMIT32
 #undef EMIT
 
@@ -362,12 +454,24 @@ bool jit(Instructions* instructions) {
 
     JitFn fn;
     memcpy(&fn, &memory, sizeof(fn));
-    int result = fn(tape, putchar);
+    int result = fn(tape, putchar, getchar);
 
     munmap(memory, code.count);
     ARRAY_FREE(&code);
 
-    return result == 0;
+    switch (result) {
+    case 0:
+        return true;
+    case 1:
+        fprintf(stderr, "Tape overflow\n");
+        return false;
+    case 2:
+        fprintf(stderr, "Tape underflow\n");
+        return false;
+    default:
+        fprintf(stderr, "Unknown JIT error: %d\n", result);
+        return false;
+    }
 }
 
 int main(int argc, char** argv) {
