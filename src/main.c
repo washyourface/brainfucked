@@ -68,20 +68,16 @@ char scanner_next(Scanner* scanner) {
 bool interpret(Instructions* instructions) {
     uint8_t tape[TAPE_SIZE] = { 0 };
     size_t ptr = 0;
+    size_t pc = 0;
 
-    for (size_t i = 0; i < instructions->count; i++) {
-        Instruction instr = instructions->items[i];
+    while (pc < instructions->count) {
+        Instruction instr = instructions->items[pc];
 
         switch (instr.opcode) {
         case OP_ADD:
             tape[ptr] += instr.operand;
             break;
 
-        case OP_OUTPUT:
-            for (size_t j = 0; j < instr.operand; j++) {
-                putchar(tape[ptr]);
-            }
-            break;
         case OP_SUB:
             tape[ptr] -= instr.operand;
             break;
@@ -101,16 +97,40 @@ bool interpret(Instructions* instructions) {
             }
             ptr -= instr.operand;
             break;
+
+        case OP_OUTPUT:
+            for (size_t j = 0; j < instr.operand; j++) {
+                putchar(tape[ptr]);
+            }
+            break;
+
         case OP_INPUT: {
             int ch = getchar();
             tape[ptr] = ch == EOF ? 0 : (uint8_t)ch;
             break;
         }
 
+        case OP_JUMP_ZERO:
+            if (tape[ptr] == 0) {
+                pc = instr.operand;
+                continue;
+            }
+            break;
+
+        case OP_JUMP_NONZERO:
+            if (tape[ptr] != 0) {
+                pc = instr.operand;
+                continue;
+            }
+            break;
+
         default:
             break;
         }
+
+        pc++;
     }
+
     return true;
 }
 

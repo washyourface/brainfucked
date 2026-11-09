@@ -65,6 +65,31 @@ tests = {
         bytes([255]),
         bytes([255]),
     ),
+    "loop_skip": (
+        "[+]+++++.",
+        bytes([5]),
+    ),
+    "loop_simple": (
+        "+++[-]+++++.",
+        bytes([5]),
+    ),
+    "loop_nested": (
+        "++[>++[>+<-]<-]>>.",
+        bytes([4]),
+    ),
+    "tape_overflow": (
+        "+[>+]",
+        b"",
+    ),
+    "tape_underflow": (
+        "+[<]",
+        b"",
+    ),
+}
+
+expected_errors = {
+    "tape_overflow": (1, b"Tape overflow\n"),
+    "tape_underflow": (1, b"Tape underflow\n"),
 }
 
 directory = Path("tests")
@@ -73,14 +98,18 @@ directory.mkdir(exist_ok=True)
 for name, test in tests.items():
     source, expected, *stdin = test
 
+    exit_code, stderr = expected_errors.get(name, (0, b""))
+
     path = directory / f"{name}.bf"
 
     path.write_text(source + "\n", encoding="ascii")
 
     Path(f"{path}.expected").write_bytes(
-        b"[exit]\n0\n[stdout]\n"
+        f"[exit]\n{exit_code}\n[stdout]\n".encode("ascii")
         + expected
-        + b"\n[stderr]\n\n"
+        + b"\n[stderr]\n"
+        + stderr
+        + b"\n"
     )
 
     if stdin:
